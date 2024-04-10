@@ -1,0 +1,691 @@
+---
+title: "Audio-Based Genre Classification Using Machine Learning: A Feature-Driven Approach"
+author: "Sophie Guo"
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+    toc_depth: 4
+    toc_float: yes
+---
+
+<style>
+  .tocify {
+    position: fixed;
+    left: 0;
+    top: 50px; /* Adjust as needed */
+    bottom: 0;
+    width: 250px; /* Adjust width */
+    overflow-y: auto;
+  }
+</style>
+
+```{r, include = F}
+library(dplyr)
+library(heatmaply)
+library(plotly)
+library(tidyverse)
+library(MASS)
+library(ggplot2)
+library(tidyr)
+library(caret)
+library(class)
+library(kableExtra)
+library(keras)
+library(tensorflow)
+```
+
+```{r, include = F}
+# Color palette
+palette <- c("#a6cee3", "#1f78b4", "#b2df8a", "#33a02c", "#fb9a99", 
+                 "#e31a1c", "#fdbf6f", "#ff7f00", "#cab2d6", "#6a3d9a")
+```
+
+# **Introduction**
+
+#### **Preview of the dataset**
+
+Our primary dataset is the [GTZAN Dataset](https://www.kaggle.com/datasets/andradaolteanu/gtzan-dataset-music-genre-classification), which includes data spanning ten genres, with a hundred 30-second audio files for each. For the purposes of my analysis, I utilized the segmented dataset, where each original audio file has been partitioned into 3-second clips. This segmentation allows for a more granular examination of the musical features embedded within the dataset. This data was collected in 2000-2001 using a variety of sources such as CDs, radio, and microphone recordings, to account for potential variations in recording methods.
+
+```{r, echo = F}
+features <- read.csv("features_3_sec.csv")
+
+head(features)
+```
+
+# **Examining Relationships**
+
+#### **Correlation Heatmap**
+
+During exploratory data analysis, I found significant correlations among variables. The plot below illustrates the correlation coefficients between the first 25 numeric variables in the dataset (excluding constants).
+
+```{r, echo = F}
+# Getting rid of the categorical and constant variables
+numeric_data <- subset(features, 
+                      select = c(-filename, -length, -label))
+
+# Compute the correlation matrix for the first 25 variables
+correlation_matrix <- cor(numeric_data[, 1:25])
+
+# Create interactive correlation plot
+heatmaply(correlation_matrix, 
+          labRow = rownames(correlation_matrix), 
+          labCol = colnames(correlation_matrix),
+          fontsize = 10,
+          main = "Correlation between musical features",
+          hoverinfo = "z",
+          dendrogram = "none",
+          col = colorRampPalette(c("#67001F", "#B2182B", "#D6604D", "#F4A582", "#FDDBC7", "#FFFFFF", "#D1E5F0", "#92C5DE", "#4393C3", "#2166AC", "#053061"))(100))
+```
+
+#### **Scatter Plot**
+
+The line plot highlights a strong relationship (r = 0.89) observed between the mean spectral bandwidth and spectral centroid across genres. Through interactive filtering, you can refine the view by clicking (and double-clicking) genre labels on the plot's right side. I decided to filter results by genre for a more focused exploratory comparative analysis on genre-specific patterns. 
+
+These observations hint at potential redundancy or multicollinearity within the dataset. To address this issue, I explored dimensionality reduction techniques aimed at enhancing robustness and reducing noise.
+
+```{r, echo = F}
+gg = features %>%
+  ggplot(aes(x = spectral_bandwidth_mean, y = spectral_centroid_mean, color = label)) + 
+  geom_point() + 
+  scale_color_manual(values = palette) + 
+  theme_minimal() +
+  labs(
+    title = "Relationship between Spectral Bandwidth and Centroid",
+    x = "Spectral Bandwidth (Mean)",
+    y = "Spectral Centroid (Mean)"
+  )
+
+# Convert ggplot object to plotly
+plotly_gg <- ggplotly(gg)
+```
+
+```{r, echo = F}
+# Extract unique label values
+unique_labels <- unique(features$label)
+
+# Create the layout with the dropdown menu
+plotly_gg %>%
+  layout(
+    updatemenus = list(
+      list(
+        buttons = list(
+          list(
+            args = list(list(visible = rep(TRUE, nrow(features)))),
+            label = "Show All",
+            method = "update"
+          )
+        ),
+        direction = "down",
+        pad = list(t = 50, r = 10),
+        showactive = TRUE,
+        x = 0.05,
+        xanchor = "left",
+        y = 1.1,
+        yanchor = "top",
+        type = "dropdown")
+        )
+      )
+```
+
+# **Dimension Reduction: Principal Component Analysis**
+
+#### **Scree plots for variance explained (left) and cumulative variance explained (right)**
+
+When aiming to capture 90% of the variance, there is a modest reduction in dimensions, decreasing from 57 to 31.
+
+```{r, echo=F}
+pca_data <- prcomp(numeric_data, scale = TRUE)
+
+pca_var <- pca_data$sdev^2
+pve <- pca_var/sum(pca_var) 
+
+var_explained_df <- data.frame(PC= paste0("PC",1:57),
+                              var_explained=pve,
+                              cum_explained=cumsum(pve))
+
+par(mfrow = c(1,2))
+plot(pve, xlab = "Principal Component", ylab = "Proportion of Variance Explained", type = "b")
+abline(v = which(var_explained_df$cum_explained >= 0.90)[1], col = "red")
+plot(cumsum(pve), xlab = "Principal Component", ylab = "Cumulative Proportion of Variance Explained", ylim = c(0, 1), type = "b")
+abline(h = 0.90, col = "red")
+```
+
+#### **PCA Plot**
+
+The lack of clear separation observed in the PCA plot suggests that the genres of music are not easily distinguishable within the reduced-dimensional space defined by the principal components. This indicates potential complexity within the data or significant overlap between classes in terms of their features. Given this observation, which implies that the data does not lend itself well to PCA, I will not utilize the reduced dataset to aid in classification.
+
+```{r, echo = F}
+pca_scores <- pca_data$x # PCs/ PC scores 
+
+low_dim_rep <- pca_scores %>% 
+  data.frame() %>% mutate(label = features$label)
+
+ggplot(low_dim_rep %>% mutate(x = 1:nrow(low_dim_rep)), 
+       aes(x = PC1, y = PC2)) +
+  geom_vline(xintercept = 0) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_text(aes(label = label, color = label), size = 2.5) +
+  #scale_x_continuous(breaks = -10:10) +
+  scale_color_manual(values = palette) +  # Add the custom color palette
+  theme_linedraw()
+```
+
+# **Linear Discriminant Analysis**
+```{r, echo = F}
+# Function to calculate accuracy rates for each class
+calculate_class_accuracy <- function(predicted_classes, true_labels) {
+  # Identify unique classes
+  unique_classes = unique(true_labels)
+  
+  # Initialize vector to store accuracy rates for each class
+  class_accuracy = numeric(length(unique_classes))
+  
+  # Calculate accuracy for each class
+  for (i in 1:length(unique_classes)) {
+    # Extract predicted and true labels for the current class
+    class_pred = predicted_classes[true_labels == unique_classes[i]]
+    class_true = true_labels[true_labels == unique_classes[i]]
+    
+    # Calculate accuracy for the current class
+    class_accuracy[i] = mean(class_pred == class_true)
+  }
+  
+  # Create a named vector with class names and corresponding accuracy rates
+  names(class_accuracy) = unique_classes
+  
+  return(class_accuracy)
+}
+```
+
+```{r, echo = F}
+set.seed(100)
+features <- features %>% dplyr::select(-filename, -length)
+
+# Get unique class labels
+class_labels <- levels(factor(features$label))
+
+# Initialize an empty data frame to store accuracies
+accuracy_df <- data.frame(label = rep(class_labels), matrix(NA, nrow = length(class_labels), ncol = 50))
+
+# Create an empty data frame to store predicted and true labels
+prediction_df <- data.frame(predicted_label = character(), true_label = character(), stringsAsFactors = FALSE)
+
+# Loop 50 times
+for (i in 1:50) {
+  # Split the data into training and test sets
+  train_indices <- sample(1:nrow(features), 0.80 * nrow(features))
+  train_data <- features[train_indices,]
+  test_data <- features[-train_indices,]
+  
+  # Perform LDA on training data
+  fit_lda <- lda(label~., data = train_data)
+
+  # Predict on the test data using the trained LDA model
+  fit_lda_test_pred <- predict(fit_lda, newdata = test_data)$class
+  
+  # Calculate class accuracy for the current iteration
+  class_accuracy <- calculate_class_accuracy(fit_lda_test_pred, test_data$label)
+  
+  # Store accuracies in the data frame
+  accuracy_df[,i+1] = class_accuracy
+  
+  # Add predicted and true labels to the prediction data frame
+  prediction_df <- rbind(prediction_df, data.frame(predicted_label = fit_lda_test_pred, true_label = test_data$label))
+}
+```
+
+#### **Accuracy Distribution**
+
+The plot below illustrates the distribution of test accuracies across musical genres obtained using Linear Discriminant Analysis (LDA) from fifty train-test (80-20 split) iterations. The red dashed line marks the overall accuracy of LDA, which was 67.22%.
+
+```{r, echo = F}
+overall_accuracy <- sum(prediction_df$predicted_label == prediction_df$true_label) / nrow(prediction_df)
+```
+
+```{r, echo = F}
+# Reshape accuracy_df into long format
+accuracy_df_long <- gather(accuracy_df, key = "label", value = "Accuracy", -label)
+
+# Add label column back
+accuracy_df_long$genre <- rep(class_labels, 50)
+
+# Plot boxplot with individual points
+ggplot(accuracy_df_long, aes(x = genre, y = Accuracy)) +
+  geom_boxplot() +
+  geom_hline(yintercept = overall_accuracy, linetype = "dashed", color = "red") +
+  labs(title = "Distribution of LDA Accuracies Across Genres",
+       x = "Genre",
+       y = "Accuracy") +
+  theme_minimal()
+```
+
+#### **Preview: Predictions across 50 trials**
+
+This dataframe comprises all predictions collected across the fifty train-test iterations. It contains a total of 99,900 observations.
+
+```{r, echo = F}
+# Dataframe with predicted and true labels
+kable(head(prediction_df))
+```
+
+```{r, echo = F, message = F}
+# Calculate the prediction rate for each predicted label, within each true label group
+prediction_df_2 <- prediction_df %>%
+  group_by(true_label) %>%
+  mutate(total_count = n()) %>%
+  ungroup() %>%
+  group_by(true_label, predicted_label) %>%
+  summarize(pred_rate = n() / first(total_count))
+```
+
+#### **Model-predicted genres for true "blues" labels**
+```{r, echo = F}
+# Bar plot of prediction rates for each predicted label within the "blues" true label group
+ggplot(data = prediction_df_2[prediction_df_2$true_label == "blues", ]) +
+  geom_bar(aes(x = predicted_label, y = pred_rate), fill = palette[1], stat = "identity") +
+  theme_minimal()
+```
+
+#### **Full view: Model-predicted genres for each true genre label**
+```{r, echo = F}
+# Create separate bar graphs for each true_label
+ggplot(data = prediction_df_2, aes(x = predicted_label, y = pred_rate, fill = true_label)) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.2) +
+  scale_fill_manual(values = palette) +  
+  theme_minimal() +
+  facet_wrap(~ true_label, scales = "free_y") +
+  theme(axis.text.x = element_text(size = 8, angle = 45, hjust = 1),
+        legend.position = "none")
+```
+
+# **Quadratic Discriminant Analysis**
+```{r, echo = F}
+set.seed(100)
+
+# Initialize an empty data frame to store accuracies
+accuracy_df_2 <- data.frame(label = rep(class_labels), matrix(NA, nrow = length(class_labels), ncol = 50))
+
+# Create an empty data frame to store predicted and true labels
+prediction_df_3 <- data.frame(predicted_label = character(), true_label = character(), stringsAsFactors = FALSE)
+
+# Loop 50 times
+for (i in 1:50) {
+  # Split the data into training and test sets
+  train_indices <- sample(1:nrow(features), 0.80 * nrow(features))
+  train_data <- features[train_indices,]
+  test_data <- features[-train_indices,]
+  
+  # Perform QDA on training data
+  fit_qda <- qda(label~., data = train_data)
+
+  # Predict on the test data using the trained QDA model
+  fit_qda_test_pred <- predict(fit_qda, newdata = test_data)$class
+  
+  # Calculate class accuracy for the current iteration
+  class_accuracy <- calculate_class_accuracy(fit_lda_test_pred, test_data$label)
+  
+  # Store accuracies in the data frame
+  accuracy_df_2[,i+1] = class_accuracy
+  
+  # Add predicted and true labels to the prediction data frame
+  prediction_df_3 <- rbind(prediction_df_3, data.frame(predicted_label = fit_qda_test_pred, true_label = test_data$label))
+}
+```
+
+#### **Accuracy Distribution**
+
+The plot below illustrates the distribution of test accuracies across musical genres obtained using Quadratic Discriminant Analysis (QDA) from fifty train-test (80-20 split) iterations. The red line displays the overall accuracy, which was 76.81%.
+
+```{r, echo = F}
+overall_accuracy_2 <- sum(prediction_df_3$predicted_label == prediction_df_3$true_label) / nrow(prediction_df_3)
+```
+
+```{r, echo = F}
+# Reshape accuracy_df into long format
+accuracy_df_long_2 <- gather(accuracy_df_2, key = "label", value = "Accuracy", -label)
+
+# Add label column back
+accuracy_df_long_2$genre = rep(class_labels, 50)
+
+# Plot boxplot with individual points
+ggplot(accuracy_df_long_2, aes(x = genre, y = Accuracy)) +
+  geom_boxplot() +
+  geom_hline(yintercept = overall_accuracy_2, linetype = "dashed", color = "red") +
+  labs(title = "Distribution of QDA Accuracies Across Genres",
+       x = "Genre",
+       y = "Accuracy") +
+  theme_minimal()
+```
+
+```{r, echo = F, message = F}
+# Calculate the prediction rate for each predicted label, within each true label group
+prediction_df_4 = prediction_df_3 %>%
+  group_by(true_label) %>%
+  mutate(total_count = n()) %>%
+  ungroup() %>%
+  group_by(true_label, predicted_label) %>%
+  summarize(pred_rate = n() / first(total_count))
+```
+
+#### **Model-predicted genres for true "blues" labels**
+```{r, echo = F}
+# Bar plot of prediction rates for each predicted label within the "blues" true label group
+ggplot(data = prediction_df_4[prediction_df_4$true_label == "blues", ]) +
+  geom_bar(aes(x = predicted_label, y = pred_rate), fill = palette[1], stat = "identity") +
+  theme_minimal()
+```
+
+#### **Full view: Model-predicted genres for each true genre label**
+```{r, echo = F}
+# Create separate bar graphs for each true_label
+ggplot(data = prediction_df_4, aes(x = predicted_label, y = pred_rate, fill = true_label)) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.2) +
+  scale_fill_manual(values = palette) +  
+  theme_minimal() +
+  facet_wrap(~ true_label, scales = "free_y") +
+  theme(axis.text.x = element_text(size = 8, angle = 45, hjust = 1),
+        legend.position = "none")
+```
+
+# **Feedforward Neural Network**
+
+#### **Neural Network Architecture**
+
+Following experimentation involving diverse layer structures and various activation functions (e.g., sigmoid instead of ReLU), it became evident that this particular architecture yielded the most favorable predictive outcomes:
+
+<pre>
+  nn_mod <- keras_model_sequential() %>% 
+    layer_dense(units = 128, activation = "relu", input_shape = c(57)) %>% 
+    layer_dense(units = 64, activation = "relu") %>% 
+    layer_dense(units = 10, activation = "softmax")
+</pre>
+
+```{r, echo = F}
+set.seed(100)
+
+# 80-20 train test split
+train_ind <- sample(1:nrow(numeric_data), 0.80*nrow(numeric_data))
+features_train <- features[train_ind, ]
+features_test <- features[-train_ind, ]
+
+## Getting rid of label variable
+numeric_data_train <- subset(features_train, select = -label)
+numeric_data_test <- subset(features_test, select = -label)
+
+# Convert features and labels to appropriate formats
+train_features <- as.matrix(numeric_data_train)
+test_features <- as.matrix(numeric_data_test)
+
+# Z-Score Normalization (Standardization)
+train_scaled_features <- apply(train_features, 2, function(x) {
+  (x - mean(x)) / sd(x)
+  })
+# Z-Score Normalization (Standardization)
+test_scaled_features <- apply(test_features, 2, function(x) {
+  (x - mean(x)) / sd(x)
+  })
+
+train_response <- as.integer(factor(features_train[, "label"])) - 1  # Subtract 1 to zero-index the categories
+test_response <- as.integer(factor(features_test[, "label"])) - 1  # Subtract 1 to zero-index the categories
+
+# One-hot encode the labels
+train_labels_onehot <- to_categorical(train_response)
+test_labels_onehot <- to_categorical(test_response)
+```
+
+#### **Hyperparameter Optimization**
+
+I conducted a grid search across the parameter space defined by the batch sizes (8, 16, 32, 64) and epochs (10, 15, 20, 25) to determine the optimal configuration that would minimize validation loss. A batch size of 16 paired with 15 epochs were found to be the most effective parameters.
+
+```{r, echo = F}
+if (!knitr::is_html_output()) {
+  # Clear the TensorFlow session
+  keras::k_clear_session()
+  
+  # Define a range of batch sizes and epochs to search over
+  batch_sizes <- c(8, 16, 32, 64)
+  epochs <- c(10, 15, 20, 25)
+  
+  # Initialize variables to store results
+  best_batch_size <- NULL
+  best_epoch <- NULL
+  best_validation_loss <- Inf
+  
+  # Iterate over each combination of batch size and epoch
+  for (batch_size in batch_sizes) {
+    for (epoch in epochs) {
+      
+      # Define and compile the model
+      nn_mod <- keras_model_sequential() %>%
+        layer_dense(units = 128, activation = "relu", input_shape = c(57)) %>%
+        layer_dense(units = 64, activation = "relu") %>%
+        layer_dense(units = 10, activation = "softmax")
+      
+      nn_mod %>% compile(
+        optimizer = "adam", 
+        loss = "categorical_crossentropy", 
+        metrics = c("accuracy"))
+      
+      # Train the model
+      trained_nn <- nn_mod %>% fit(
+        x = train_scaled_features, 
+        y = train_labels_onehot,
+        epochs = epoch,
+        batch_size = batch_size, 
+        validation_split = 0.2,
+        verbose = 0)
+      
+      # Get the validation loss from the history object
+      validation_loss <- tail(trained_nn$metrics$val_loss, 1)
+      
+      # Update the best batch size and epoch if the current combination is better
+      if (validation_loss < best_validation_loss) {
+        best_batch_size <- batch_size
+        best_epoch <- epoch
+        best_validation_loss <- validation_loss
+      }
+    }
+  }
+  
+  # Print the best batch size and epoch
+  print(paste("Best Batch Size:", best_batch_size))
+  print(paste("Best Epoch:", best_epoch))
+  print(paste("Best Validation Loss:", best_validation_loss))
+}
+```
+
+#### **Optimized Neural Network Performance**
+
+The following plots display the results obtained during the training of the neural network, using the optimal hyperparameters. Ultimately, the trained model demonstrated a test accuracy ranging from 84% to 87%.
+
+```{r, echo = F, warning = F}
+# Using the best epoch = 15, and best batch size = 16 found from the code chunk above
+set.seed(100)
+
+nn_mod <- keras_model_sequential() %>%
+  layer_dense(units = 128, activation = "relu", input_shape = c(57)) %>%
+  layer_dense(units = 64, activation = "relu") %>%
+  layer_dense(units = 10, activation = "softmax")
+
+# Compile the model
+nn_mod %>% compile(
+  optimizer = "adam", 
+  loss = "categorical_crossentropy", 
+  metrics = "accuracy")
+
+trained_nn <- nn_mod %>% fit(
+  train_scaled_features, train_labels_onehot,
+  epochs = 15,
+  batch_size = 16, 
+  validation_split = 0.2, 
+  verbose = 0)
+
+# Plot training history
+plot_history <- function(history) {
+  par(mfrow = c(1, 2))  # Set up a multi-panel plot
+  
+  # Plot training and validation loss
+  plot(history$metrics$loss, type = "l", col = "blue", ylim = c(0, max(history$metrics$loss, history$metrics$val_loss)), xlab = "Epoch", ylab = "Loss", main = "Training and Validation Loss")
+  lines(history$metrics$val_loss, col = "red")
+  legend("topright", legend = c("Training", "Validation"), col = c("blue", "red"), lty = 1, cex = 0.8)
+  
+  # Plot training and validation accuracy
+  plot(history$metrics$accuracy, type = "l", col = "blue", ylim = c(0, 1), xlab = "Epoch", ylab = "Accuracy", main = "Training and Validation Accuracy")
+  lines(history$metrics$val_accuracy, col = "red")
+  legend("bottomright", legend = c("Training", "Validation"), col = c("blue", "red"), lty = 1, cex = 0.8)
+}
+
+# Plot the training history
+plot_history(trained_nn)
+```
+
+```{r, echo = F, include = F}
+set.seed(100)
+
+# Predict on test data
+predictions <- predict(nn_mod, test_scaled_features)
+
+# Take highest probability to convert to class labels
+predicted_classes <- apply(predictions, 1, which.max)
+test_classes <- apply(test_labels_onehot, 1, which.max)
+
+# Calculate accuracy
+nn_accuracy <- mean(predicted_classes == test_classes)
+```
+
+# **K-Nearest Neighbors**
+
+#### **Optimizing k**
+
+After standardizing the features through centering and scaling, I optimized the k parameter for the K-nearest neighbors (KNN) algorithm. Utilizing 5-fold cross-validation, I evaluated multiple k values to pinpoint the one that minimizes classification error.
+
+```{r, echo = F}
+# Standardize the columns by centering and scaling each column
+x = features %>% dplyr::select(-label)
+x_scaled = as.data.frame(scale(x, center = TRUE, scale = TRUE))
+features_scaled = cbind(features %>% dplyr::select(label), x_scaled)
+```
+
+```{r, echo = F}
+#  Function to perform n-fold cross-validation with k-Nearest Neighbors (kNN) algorithm
+best.k.cv <- function(df, folds, chosen_k){
+    # Split data into folds of equal size
+  fold_nums <- rep(NA, nrow(df))  # Initialize vector to store fold numbers
+  
+  for(i in 1:nrow(df)){
+    fold_nums[i] <- sample(1:folds, 1)
+  }
+  
+    # Iterate training k-NN model on fixed fold
+  class_error <- numeric(folds)  # Initialize vector to store classification
+  
+  for(i in 1:folds){
+    train_data <- df[fold_nums != i, ]  # Training data
+    test_data <- df[fold_nums == i, ]   # Test data
+    
+    predictions <- knn(train = subset(train_data, select = -label),
+              test = subset(test_data, select = -label),
+              cl = train_data$label,
+              k = chosen_k)
+    
+      # Calculate classification error
+    class_error[i] = mean(test_data$label != predictions)
+  }
+  
+  return(mean(class_error))
+}
+```
+
+```{r, echo = F}
+set.seed(100)
+
+# Initialize variables
+lowest_error <- Inf
+best_k <- 1
+error_rates <- numeric(15)
+
+# Iterate over k from 1 to 15
+for (k in 1:15) { 
+  error <- best.k.cv(features_scaled, 5, k)  # Assuming 5 folds for cross-validation
+  error_rates[k] <- error  # Store error rate for each k value
+  if (error < lowest_error) {
+    lowest_error <- error
+    best_k <- k
+  }
+}
+
+
+plot(1:15, error_rates, type = "b", pch = 16, col = "blue", xlab = "k", ylab = "Error Rate",
+     main = "Error Rate vs. k",
+     xlim = c(1, 15), ylim = c(0, 0.20),
+     xaxs = "i", yaxs = "i")
+abline(v = best_k, col = "red", lty = 2)
+text(best_k, lowest_error, paste("Best k:", best_k), pos = 1, col = "red")
+```
+
+#### **Testing KNN: 80-20 Split**
+
+After partitioning the dataset into training and testing subsets with an 80-20 ratio, I performed the K-nearest neighbors (KNN) algorithm utilizing the optimal k value of 1. This KNN model has an accuracy of 90.69%.
+
+```{r, echo = F}
+set.seed(100)
+
+train_indices <- sample(1:nrow(features_scaled), 0.80 * nrow(features_scaled))
+train_data <- features_scaled[train_indices,]
+test_data <- features_scaled[-train_indices,]
+
+# Make predictions on the test data using K-NN k=1
+fit.cv.knn.test <- knn(train_data[, -which(names(features_scaled) == "label")], test = test_data[, -which(names(features_scaled) == "label")], cl = train_data$label, k = 1)
+
+# Evaluate the model using confusion matrix
+conf_matrix <- confusionMatrix(fit.cv.knn.test, as.factor(test_data$label))
+
+# Print confusion matrix and overall metrics
+overall_metrics = as.data.frame(conf_matrix$overall)
+overall_metrics = overall_metrics %>% rename("Value" = "conf_matrix$overall") %>% mutate(Value = round(Value, 4))
+
+kable(conf_matrix$table, digits = 4, align = "c", caption = "Confusion Matrix")
+kable(overall_metrics, digits = 4, caption = "Overall Metrics")
+```
+
+#### **Testing KNN: Leave-One-Out Cross-Validation**
+
+I conducted Leave-One-Out Cross-Validation (LOOCV) employing the KNN algorithm with the optimal k value of 1 on the dataset. The resulting accuracy was 92.22%. Notably, LOOCV offers a more thorough validation approach compared to traditional 80-20 splits, as it evaluates the model's performance on every single data point, providing a comprehensive assessment of its generalization capability.
+
+```{r, echo = F}
+## Leave one out cross validation with best k = 1
+fit.cv.knn <- knn.cv(features_scaled[, -which(names(features_scaled) == "label")], cl = features_scaled$label, k = 1)
+
+# Evaluate the model using confusion matrix
+conf_matrix_2 <- confusionMatrix(fit.cv.knn, as.factor(features_scaled$label))
+
+# Print confusion matrix and overall metrics
+overall_metrics_2 = as.data.frame(conf_matrix_2$overall)
+overall_metrics_2 = overall_metrics_2 %>% rename("Value" = "conf_matrix_2$overall") %>% mutate(Value = round(Value, 4))
+
+kable(conf_matrix_2$table, digits = 4, align = "c", caption = "Confusion Matrix")
+kable(overall_metrics_2, digits = 4, caption = "Overall Metrics")
+```
+
+# **Conclusion**
+
+#### **Comparison of Classification Techniques**
+
+After conducting classification experiments on musical genres using LDA, QDA, Neural Networks, and KNN, I discover that KNN with k=1 yields the highest accuracy rate of 92.22%. While musical genres may be somewhat subjective, this model excels at recognizing the intricate patterns embedded within the audio features associated with various genres. This emphasizes the effectiveness of KNN in genre classification tasks, offering valuable insights into the discriminative power of audio features across diverse musical genres.
+
+```{r, echo = F}
+# Data frame with accuracies
+compare_acc_df <- data.frame(Method = c("LDA", "QDA", "NN", "KNN k=1"), Accuracy = c(round(overall_accuracy, 4), round(overall_accuracy_2, 4), round(nn_accuracy, 4), overall_metrics_2$Value[1]))
+
+# Reorder based on Increasing Accuracy
+compare_acc_df$Method <- factor(compare_acc_df$Method, levels = compare_acc_df$Method[order(compare_acc_df$Accuracy)])
+
+ggplot(compare_acc_df, aes(x = Method, y = Accuracy)) +
+  geom_bar(stat = "identity", fill = "lightskyblue3") +
+  geom_text(aes(label = paste0(Accuracy)), vjust = -0.5, size = 3.3) +  # Add text labels
+  labs(x = "Method", y = "Accuracy") +
+  ggtitle("Classification Accuracy Across Methods") +
+  theme_minimal()
+```
+
