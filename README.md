@@ -6,7 +6,7 @@ This project explores music genre classification using the GTZAN dataset, combin
 
 ## **Overview**
 
-- **Dataset**: GTZAN Dataset, segmented into 3-second audio clips from 10 genres (1,000 clips per genre).
+- **Dataset**: GTZAN Dataset (each genre is represented by 100 audio clips, each 30 seconds long).
 - **Features**: Extracted data includes 57 attributes such as:
   - Chroma STFT, Spectral Centroid, MFCCs (1-20), Tempo, RMS, Harmony, etc.
 - **Preprocessing**:
@@ -38,9 +38,3 @@ This project explores music genre classification using the GTZAN dataset, combin
 - Required libraries:
   - Python: `tensorflow`, `keras`, `scikit-learn`, `pandas`, `numpy`, `matplotlib`, `seaborn`
   - R: `dplyr`, `ggplot2`, `caret`, `glmnet`, `heatmaply`, `plotly`, `tidyverse`
-
-### **Installation**
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/yourusername/audio-genre-classification.git
-   cd audio-genre-classification
